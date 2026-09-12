@@ -1,0 +1,42 @@
+# Unity generated
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+MemoryCaptures/
+Recordings/
+
+# IDE / generated project files
+.vs/
+.idea/
+.vscode/
+*.csproj
+*.sln
+*.slnx
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Unity crash/debug files
+sysinfo.txt
+*.stackdump
+
+# Temporary files
+.utmp/
+
+# Oversized skybox cubemaps
+Assets/Real Stars Skybox/StarSkybox04/CubemapStars.cubemap
+Assets/Real Stars Skybox/StarSkybox04Named/CubemapStarsNamed.cubemap
