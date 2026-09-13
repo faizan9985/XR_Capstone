@@ -44,6 +44,13 @@ public sealed class GrabColorFeedback : MonoBehaviour
         runtimeMaterial.color = grabInteractable.isSelected ? grabbedColor : originalColor;
     }
 
+    public void SetRestingColor(Color color)
+    {
+        originalColor = color;
+        if (runtimeMaterial != null)
+            runtimeMaterial.color = grabInteractable.isSelected ? grabbedColor : originalColor;
+    }
+
     private void OnDisable()
     {
         if (grabInteractable != null)

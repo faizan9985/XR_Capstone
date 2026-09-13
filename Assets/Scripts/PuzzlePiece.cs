@@ -4,7 +4,8 @@ using UnityEngine.XR.Interaction.Toolkit.Interactables;
 public enum PuzzlePieceType
 {
     Cube,
-    Sphere
+    Sphere,
+    Capsule
 }
 
 [DisallowMultipleComponent]
@@ -15,6 +16,13 @@ public sealed class PuzzlePiece : MonoBehaviour
 
     public PuzzlePieceType PieceType => pieceType;
     public bool IsCompleted { get; private set; }
+    public event System.Action<PuzzlePiece> Completed;
+    public event System.Action<PuzzlePiece> Removed;
+
+    private void OnDestroy()
+    {
+        Removed?.Invoke(this);
+    }
 
     public bool TryLockTo(Transform target)
     {
@@ -45,6 +53,7 @@ public sealed class PuzzlePiece : MonoBehaviour
         body.position = target.position;
         body.rotation = target.rotation;
         transform.SetPositionAndRotation(target.position, target.rotation);
+        Completed?.Invoke(this);
         return true;
     }
 }
