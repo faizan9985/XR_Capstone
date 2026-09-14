@@ -9,6 +9,7 @@ public sealed class PuzzleManager : MonoBehaviour
 
     public int PieceCount => pieces.Count;
     public bool IsCompleted { get; private set; }
+    public event System.Action PuzzleCompleted;
 
     public void SetPieces(IEnumerable<PuzzlePiece> generatedPieces)
     {
@@ -59,6 +60,7 @@ public sealed class PuzzleManager : MonoBehaviour
         }
         IsCompleted = true;
         Debug.Log("Puzzle Complete", this);
+        PuzzleCompleted?.Invoke();
     }
 
     private void OnDestroy() => ClearPieces();

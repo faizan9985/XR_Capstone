@@ -15,6 +15,25 @@ public sealed class PuzzleGenerator : MonoBehaviour
         public PuzzleTarget targetPrefab;
     }
 
+    [Serializable]
+    public sealed class PairLayout
+    {
+        public PuzzlePiece piecePrefab;
+        public PuzzleTarget targetPrefab;
+        public int pairId;
+        public Vector3 piecePosition;
+        public Quaternion pieceRotation;
+        public Vector3 targetPosition;
+        public Quaternion targetRotation;
+        public Color color;
+    }
+
+    [Serializable]
+    public sealed class PuzzleLayout
+    {
+        public PairLayout[] pairs;
+    }
+
     [SerializeField] private PuzzleManager puzzleManager;
     [SerializeField] private XRInteractionManager interactionManager;
     [SerializeField, Min(1)] private int minPieceCount = 3;
@@ -28,11 +47,15 @@ public sealed class PuzzleGenerator : MonoBehaviour
     [SerializeField, Min(0.01f)] private float minimumSpacing = 0.4f;
     private GameObject generatedRoot;
     private readonly List<PuzzlePiece> generatedPieces = new List<PuzzlePiece>();
+    private PuzzleLayout currentLayout;
+    public event Action PuzzleSpawned;
 
-    private void Start() => Generate();
+    private void Start() => GenerateNewPuzzle();
 
     [ContextMenu("Generate Puzzle (Play Mode)")]
-    public void Generate()
+    public void Generate() => GenerateNewPuzzle();
+
+    public void GenerateNewPuzzle()
     {
         if (!Application.isPlaying)
             return;
@@ -60,25 +83,52 @@ public sealed class PuzzleGenerator : MonoBehaviour
             return;
         }
 
-        // Validate before removing the current puzzle, and unsubscribe before destroying pieces.
-        ClearGeneratedPuzzle();
-        generatedRoot = new GameObject("Generated Puzzle");
-        generatedRoot.transform.SetParent(transform, false);
         var count = Random.Range(minPieceCount, maxPieceCount + 1);
+        var layout = new PuzzleLayout { pairs = new PairLayout[count] };
         for (var i = 0; i < count; i++)
         {
             var shape = shapes[Random.Range(0, shapes.Length)];
-            var piece = Instantiate(shape.piecePrefab, piecePositions[i], pieceSpawnArea.rotation, generatedRoot.transform);
-            var target = Instantiate(shape.targetPrefab, targetPositions[i], targetSpawnArea.rotation, generatedRoot.transform);
-            piece.name = $"Piece {i + 1} - {piece.PieceType}";
-            target.name = $"Target {i + 1} - {piece.PieceType}";
+            layout.pairs[i] = new PairLayout
+            {
+                piecePrefab = shape.piecePrefab,
+                targetPrefab = shape.targetPrefab,
+                pairId = i + 1,
+                piecePosition = piecePositions[i],
+                pieceRotation = pieceSpawnArea.rotation,
+                targetPosition = targetPositions[i],
+                targetRotation = targetSpawnArea.rotation,
+                color = Color.HSVToRGB((float)i / count, 0.7f, 0.95f)
+            };
+        }
+        currentLayout = layout;
+        SpawnLayout(currentLayout);
+    }
+
+    public void RetryCurrentPuzzle()
+    {
+        if (Application.isPlaying && currentLayout != null)
+            SpawnLayout(currentLayout);
+    }
+
+    private void SpawnLayout(PuzzleLayout layout)
+    {
+        // Both paths recreate the original poses from data, never from moved/completed objects.
+        ClearGeneratedPuzzle();
+        generatedRoot = new GameObject("Generated Puzzle");
+        generatedRoot.transform.SetParent(transform, false);
+        foreach (var pair in layout.pairs)
+        {
+            var piece = Instantiate(pair.piecePrefab, pair.piecePosition, pair.pieceRotation, generatedRoot.transform);
+            var target = Instantiate(pair.targetPrefab, pair.targetPosition, pair.targetRotation, generatedRoot.transform);
+            piece.name = $"Piece {pair.pairId} - {piece.PieceType}";
+            target.name = $"Target {pair.pairId} - {piece.PieceType}";
             piece.GetComponent<XRGrabInteractable>().interactionManager = interactionManager;
-            var color = Color.HSVToRGB((float)i / count, 0.7f, 0.95f);
-            piece.GetComponent<GrabColorFeedback>().SetRestingColor(color);
-            target.Initialize(piece, color);
+            piece.GetComponent<GrabColorFeedback>().SetRestingColor(pair.color);
+            target.Initialize(piece, pair.color);
             generatedPieces.Add(piece);
         }
         puzzleManager.SetPieces(generatedPieces);
+        PuzzleSpawned?.Invoke();
     }
 
     private List<Vector3> CreatePositions(Transform area)
