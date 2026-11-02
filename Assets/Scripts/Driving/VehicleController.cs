@@ -35,7 +35,32 @@ namespace Driving
         [SerializeField] LayerMask groundMask = 1;
         [SerializeField, Min(0.1f)] float groundProbeDistance = 0.7f;
 
+        [Header("Slippery-road training: multipliers of the baseline forces above")]
+        [Tooltip("Remaining lateral grip versus slipperiness. Zero slipperiness always retains the baseline; grip never reaches zero.")]
+        [SerializeField] AnimationCurve lateralTractionCurve = new AnimationCurve(
+            new Keyframe(0f, 1f, -1.2f, -1.2f),
+            new Keyframe(0.25f, 0.7f, -1.2f, -1.2f),
+            new Keyframe(0.5f, 0.4f, -1.1f, -1.1f),
+            new Keyframe(0.75f, 0.15f, -0.65f, -0.65f),
+            new Keyframe(1f, 0.04f, -0.44f, -0.44f));
+        [SerializeField, Range(0.1f, 1f)] float minimumLongitudinalTraction = 0.35f;
+        [Tooltip("Remaining yaw recovery and Rigidbody angular damping at full slipperiness; fades in smoothly above 50%.")]
+        [SerializeField, Range(0.01f, 1f)] float minimumYawRecovery = 0.12f;
+        public float RoadSlipperiness { get; private set; }
+        public float LateralTractionMultiplier => RoadSlipperiness == 0f ? 1f
+            : Mathf.Clamp(lateralTractionCurve.Evaluate(RoadSlipperiness), 0.01f, 1f);
+        public float LongitudinalTractionMultiplier => Mathf.Lerp(1f, Mathf.Clamp(minimumLongitudinalTraction, 0.1f, 1f), RoadSlipperiness);
+        public float YawRecoveryMultiplier => Mathf.Lerp(1f, Mathf.Clamp(minimumYawRecovery, 0.01f, 1f),
+            Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.5f, 1f, RoadSlipperiness)));
+        public void SetRoadSlipperiness(float value)
+        {
+            RoadSlipperiness = DrivingEnvironmentController.Normalize(value);
+            ApplyAngularDamping();
+        }
+
         Rigidbody body;
+        float baselineAngularDamping;
+        void ApplyAngularDamping() { if (body != null) body.angularDamping = baselineAngularDamping * YawRecoveryMultiplier; }
         Vector3 spawnPosition;
         Quaternion spawnRotation;
         float throttle, brake, steering, smoothedThrottle;
@@ -50,6 +75,8 @@ namespace Driving
         void Awake()
         {
             body = GetComponent<Rigidbody>();
+            baselineAngularDamping = body.angularDamping;
+            ApplyAngularDamping();
             body.centerOfMass = centerOfMassOffset;
             body.constraints = RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ;
             body.interpolation = RigidbodyInterpolation.Interpolate;
@@ -58,10 +85,11 @@ namespace Driving
             spawnRotation = body.rotation;
         }
 
-        void OnEnable() { foreach (var reference in Inputs()) reference?.action?.Enable(); waitForRelease = true; }
+        void OnEnable() { ApplyAngularDamping(); foreach (var reference in Inputs()) reference?.action?.Enable(); waitForRelease = true; }
         void OnDisable()
         {
             foreach (var reference in Inputs()) reference?.action?.Disable();
+            if (body != null) body.angularDamping = baselineAngularDamping;
             ClearInput();
         }
         InputActionReference[] Inputs() => new[] { accelerateInput, brakeReverseInput, steeringInput, keyboardAccelerate, keyboardBrakeReverse, keyboardSteer };
@@ -103,32 +131,38 @@ namespace Driving
             var forward = transform.forward;
             float speed = Vector3.Dot(velocity, forward);
             float nextSpeed = speed;
+            float traction = LongitudinalTractionMultiplier;
             // Brake to a stop first. A brief deliberate hold at rest then engages reverse.
             if (brake > 0.05f)
             {
-                if (speed > 0.05f) { nextSpeed = Mathf.MoveTowards(speed, 0f, brakingForce * brake * dt); reverseHoldTime = 0f; }
+                if (speed > 0.05f) { nextSpeed = Mathf.MoveTowards(speed, 0f, brakingForce * traction * brake * dt); reverseHoldTime = 0f; }
                 else if (throttle < 0.05f && !waitForRelease && focused && !paused && !(handMenu != null && handMenu.IsMenuOpen))
                 {
                     reverseHoldTime += dt;
-                    nextSpeed = reverseHoldTime >= 0.4f ? speed - acceleration * brake * dt : Mathf.MoveTowards(speed, 0f, brakingForce * dt);
+                    nextSpeed = reverseHoldTime >= 0.4f ? speed - acceleration * traction * brake * dt : Mathf.MoveTowards(speed, 0f, brakingForce * traction * dt);
                 }
-                else { nextSpeed = Mathf.MoveTowards(speed, 0f, brakingForce * dt); reverseHoldTime = 0f; }
+                else { nextSpeed = Mathf.MoveTowards(speed, 0f, brakingForce * traction * dt); reverseHoldTime = 0f; }
             }
             else
             {
                 reverseHoldTime = 0f;
                 nextSpeed = speed < -0.05f && throttle > 0.05f
-                    ? Mathf.MoveTowards(speed, 0f, brakingForce * throttle * dt)
-                    : speed + smoothedThrottle * acceleration * dt;
+                    ? Mathf.MoveTowards(speed, 0f, brakingForce * traction * throttle * dt)
+                    : speed + smoothedThrottle * acceleration * traction * dt;
             }
             nextSpeed = Mathf.MoveTowards(nextSpeed, 0f, rollingResistance * dt);
             nextSpeed = Mathf.Clamp(nextSpeed, -maxReverseSpeed, maxForwardSpeed);
             body.AddForce(forward * ((nextSpeed - speed) / dt), ForceMode.Acceleration);
             float lateral = Vector3.Dot(velocity, transform.right);
-            body.AddForce(-transform.right * lateral * Mathf.Min(lateralGrip, 1f / dt), ForceMode.Acceleration);
+            body.AddForce(-transform.right * lateral * Mathf.Min(lateralGrip * LateralTractionMultiplier, 1f / dt), ForceMode.Acceleration);
             float desiredYaw = speed / wheelbase * Mathf.Tan(SteeringNormalized * steeringAngle * Mathf.Deg2Rad);
             float limit = maxYawRate * Mathf.Deg2Rad;
-            body.angularVelocity = new Vector3(0f, Mathf.MoveTowards(body.angularVelocity.y, Mathf.Clamp(desiredYaw, -limit, limit), dt * 0.8f), 0f);
+            float targetYaw = Mathf.Clamp(desiredYaw, -limit, limit);
+            float currentYaw = body.angularVelocity.y;
+            // Keep steering into a turn responsive, but do not instantly arrest or reverse a skid.
+            bool recoveringYaw = currentYaw * targetYaw <= 0f || Mathf.Abs(targetYaw) < Mathf.Abs(currentYaw);
+            float yawResponse = recoveringYaw ? YawRecoveryMultiplier : 1f;
+            body.angularVelocity = new Vector3(0f, Mathf.MoveTowards(currentYaw, targetYaw, dt * 0.8f * yawResponse), 0f);
             // Also bound existing horizontal momentum (e.g. after a barrier impact).
             var horizontal = Vector3.ProjectOnPlane(velocity, Vector3.up);
             if (horizontal.magnitude > maxForwardSpeed)
@@ -154,3 +188,4 @@ namespace Driving
         void OnApplicationPause(bool value) { paused = value; if (value) { ClearInput(); waitForRelease = true; } }
     }
 }
+

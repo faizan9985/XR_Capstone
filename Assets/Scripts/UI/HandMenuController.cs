@@ -2,10 +2,12 @@ using System.Collections.Generic;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.InputSystem;
 using UnityEngine.XR.Hands;
+using UnityEngine.XR;
 
 /// <summary>Uses the existing XR Hands subsystem; never creates tracking or input systems.</summary>
-[DisallowMultipleComponent]
+[DefaultExecutionOrder(1100), DisallowMultipleComponent]
 public sealed class HandMenuController : MonoBehaviour
 {
     public enum MenuHand { Left, Right }
@@ -49,6 +51,28 @@ public sealed class HandMenuController : MonoBehaviour
     [SerializeField, Min(0f)] private float positionSharpness = 18f;
     [SerializeField, Min(0f)] private float rotationSharpness = 14f;
 
+    [Header("Optional controller shortcut (off in other scenes)")]
+    [SerializeField] private bool enableControllerShortcut;
+    [Tooltip("Tracked Left Controller under the active XR Origin's Camera Offset. Required only when the shortcut is enabled.")]
+    [SerializeField] private Transform leftControllerAnchor;
+    [Tooltip("Meters in controller-local space. Raise the panel above the controller and slightly outward.")]
+    [SerializeField] private Vector3 controllerPositionOffset = new Vector3(-0.04f, 0.28f, 0.12f);
+    [Tooltip("Local Euler adjustment from a headset-facing panel, upright relative to tracking space.")]
+    [SerializeField] private Vector3 controllerRotationOffset;
+    [SerializeField, Min(0f)] private float controllerPositionSharpness = 24f;
+    [SerializeField, Min(0f)] private float controllerRotationSharpness = 18f;
+
+    private enum OpenSource { None, Palm, Controller }
+    private OpenSource openSource;
+    private InputAction controllerMenuAction;
+    private bool focused = true, paused;
+    private Vector3 controllerLocalPosition;
+    private Quaternion controllerLocalRotation;
+    private bool hasControllerPose;
+    private Transform originalMenuParent;
+    private bool controllerParented;
+    private readonly List<XRInputSubsystem> inputSubsystems = new List<XRInputSubsystem>();
+
     private static HandMenuController activeMenu;
     private readonly List<XRHandSubsystem> subsystems = new List<XRHandSubsystem>();
     private XRHandSubsystem handSubsystem;
@@ -56,7 +80,7 @@ public sealed class HandMenuController : MonoBehaviour
     private float conditionTime;
     private bool eligible;
     private bool hasPose;
-    public bool IsMenuOpen { get; private set; }
+    public bool IsMenuOpen => openSource != OpenSource.None;
     public bool IsLauncherVisible => launcherCanvas != null && launcherCanvas.gameObject.activeSelf;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
@@ -95,10 +119,25 @@ public sealed class HandMenuController : MonoBehaviour
         if (puzzleGenerator != null) puzzleGenerator.PuzzleSpawned += HideAll;
         nextSubsystemSearch = 0f;
         RefreshPassthrough();
+        if (enableControllerShortcut)
+        {
+            // Owned action: never enables/disables or edits any shared XRI action map.
+            controllerMenuAction = new InputAction("ToggleHandMenu", InputActionType.Button,
+                "<XRController>{LeftHand}/primaryButton", interactions: "press(behavior=0)");
+            controllerMenuAction.performed += OnControllerMenuPressed;
+            if (focused && !paused) controllerMenuAction.Enable();
+        }
     }
 
     private void OnDisable()
     {
+        if (controllerMenuAction != null)
+        {
+            controllerMenuAction.performed -= OnControllerMenuPressed;
+            controllerMenuAction.Disable();
+            controllerMenuAction.Dispose();
+            controllerMenuAction = null;
+        }
         if (openButton != null) openButton.onClick.RemoveListener(OpenMenu);
         if (closeButton != null) closeButton.onClick.RemoveListener(CloseMenu);
         if (restartButton != null) restartButton.onClick.RemoveListener(RestartPuzzle);
@@ -110,11 +149,90 @@ public sealed class HandMenuController : MonoBehaviour
         HideAll();
     }
 
-    private void OnApplicationPause(bool paused) { if (paused) HideAll(); }
-    private void OnApplicationFocus(bool focused) { if (!focused) HideAll(); }
+    private void OnApplicationPause(bool value) { paused = value; RefreshSessionInput(); }
+    private void OnApplicationFocus(bool value) { focused = value; RefreshSessionInput(); }
+
+    private void RefreshSessionInput()
+    {
+        if (!focused || paused)
+        {
+            controllerMenuAction?.Disable();
+            HideAll();
+        }
+        else if (isActiveAndEnabled) controllerMenuAction?.Enable();
+    }
+
+    private void OnControllerMenuPressed(InputAction.CallbackContext context)
+    {
+        if (!isActiveAndEnabled || !focused || paused) return;
+        if (IsMenuOpen) { CloseMenu(); return; }
+        if (xrCamera == null || trackingSpace == null || menuCanvas == null ||
+            leftControllerAnchor == null || !leftControllerAnchor.gameObject.activeInHierarchy) return;
+        originalMenuParent = menuCanvas.transform.parent;
+        menuCanvas.transform.SetParent(trackingSpace, true);
+        controllerParented = true;
+        hasControllerPose = false;
+        FollowController(0f); // Snap on opening; subsequent frames smooth only tracked hand motion.
+        eligible = false;
+        hasPose = false;
+        conditionTime = 0f;
+        openSource = OpenSource.Controller;
+        SubsystemManager.GetSubsystems(inputSubsystems);
+        foreach (var subsystem in inputSubsystems) subsystem.trackingOriginUpdated += OnTrackingOriginUpdated;
+        RefreshPassthrough();
+        RefreshVisibility();
+        volumeControl.Refresh();
+    }
+
+    private void FollowController(float dt)
+    {
+        var position = leftControllerAnchor.TransformPoint(controllerPositionOffset);
+        var forward = position - xrCamera.transform.position;
+        var up = trackingSpace.up;
+        if (Vector3.Cross(forward, up).sqrMagnitude < 0.0001f) up = xrCamera.transform.up;
+        var rotation = forward.sqrMagnitude > 0.0001f
+            ? Quaternion.LookRotation(forward, up) * Quaternion.Euler(controllerRotationOffset)
+            : menuCanvas.transform.rotation;
+        var localPosition = trackingSpace.InverseTransformPoint(position);
+        var localRotation = Quaternion.Inverse(trackingSpace.rotation) * rotation;
+        var positionBlend = !hasControllerPose || controllerPositionSharpness <= 0f
+            ? 1f : 1f - Mathf.Exp(-controllerPositionSharpness * dt);
+        var rotationBlend = !hasControllerPose || controllerRotationSharpness <= 0f
+            ? 1f : 1f - Mathf.Exp(-controllerRotationSharpness * dt);
+        // Smooth in tracking space so car motion and seat resets carry the menu immediately.
+        controllerLocalPosition = Vector3.Lerp(controllerLocalPosition, localPosition, positionBlend);
+        controllerLocalRotation = Quaternion.Slerp(controllerLocalRotation, localRotation, rotationBlend);
+        menuCanvas.transform.SetLocalPositionAndRotation(controllerLocalPosition, controllerLocalRotation);
+        hasControllerPose = true;
+    }
+
+    private void RestoreMenuParent()
+    {
+        if (!controllerParented) return;
+        if (menuCanvas != null) menuCanvas.transform.SetParent(originalMenuParent, true);
+        controllerParented = false;
+        originalMenuParent = null;
+    }
+
+    private void OnTrackingOriginUpdated(XRInputSubsystem subsystem) => HideAll();
+
+    private void StopWatchingTrackingOrigin()
+    {
+        foreach (var subsystem in inputSubsystems) subsystem.trackingOriginUpdated -= OnTrackingOriginUpdated;
+        inputSubsystems.Clear();
+    }
 
     private void LateUpdate()
     {
+        if (!focused || paused) { HideAll(); return; }
+        if (openSource == OpenSource.Controller)
+        {
+            if (xrCamera == null || trackingSpace == null || leftControllerAnchor == null ||
+                !leftControllerAnchor.gameObject.activeInHierarchy) { HideAll(); return; }
+            FollowController(Time.unscaledDeltaTime);
+            RefreshVisibility();
+            return;
+        }
         if (handSubsystem == null || !handSubsystem.running)
         {
             handSubsystem = null;
@@ -171,7 +289,7 @@ public sealed class HandMenuController : MonoBehaviour
             {
                 eligible = conditions;
                 conditionTime = 0f;
-                if (!eligible) IsMenuOpen = false;
+                if (!eligible) openSource = OpenSource.None;
             }
         }
         RefreshVisibility();
@@ -193,7 +311,7 @@ public sealed class HandMenuController : MonoBehaviour
     public void OpenMenu()
     {
         if (!isActiveAndEnabled || !eligible || IsMenuOpen) return;
-        IsMenuOpen = true;
+        openSource = OpenSource.Palm;
         RefreshPassthrough();
         RefreshVisibility();
         volumeControl.Refresh();
@@ -201,7 +319,12 @@ public sealed class HandMenuController : MonoBehaviour
 
     public void CloseMenu()
     {
-        IsMenuOpen = false;
+        StopWatchingTrackingOrigin();
+        RestoreMenuParent();
+        hasControllerPose = false;
+        bool wasController = openSource == OpenSource.Controller;
+        openSource = OpenSource.None;
+        if (wasController) { eligible = false; hasPose = false; conditionTime = 0f; }
         RefreshVisibility();
     }
 
@@ -229,7 +352,7 @@ public sealed class HandMenuController : MonoBehaviour
     private void RefreshVisibility()
     {
         SetVisible(launcherCanvas, eligible && !IsMenuOpen);
-        SetVisible(menuCanvas, eligible && IsMenuOpen);
+        SetVisible(menuCanvas, IsMenuOpen && (openSource == OpenSource.Controller || eligible));
     }
 
     private static void SetVisible(Canvas canvas, bool value)
@@ -239,8 +362,11 @@ public sealed class HandMenuController : MonoBehaviour
 
     private void HideAll()
     {
+        StopWatchingTrackingOrigin();
+        RestoreMenuParent();
+        hasControllerPose = false;
         eligible = false;
-        IsMenuOpen = false;
+        openSource = OpenSource.None;
         hasPose = false;
         conditionTime = 0f;
         SetVisible(launcherCanvas, false);
